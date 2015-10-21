@@ -25,6 +25,7 @@ public class Client {
     private static final String KEY_PROPERTY = "google.api.key";
     private static final String QPS_PROPERTY = "google.api.queriesPerSecond";
     private static final String THROTTLE_PROPERTY = "google.api.throttleInterval";
+    private static final String MAX_SIDE_LENGTH_PROPERTY = "google.api.maxSideLength";
 
 
     public static void main(String... args) throws Exception {
@@ -41,8 +42,9 @@ public class Client {
 
         Properties properties = new Properties();
         File propertiesFile = loadPropertiesFile(directory, properties);
-        int queriesPerSecond = getProperty(QPS_PROPERTY, properties, 1);
-        int throttleProperty = getProperty(THROTTLE_PROPERTY, properties, 10000);
+        int queriesPerSecond = getProperty(QPS_PROPERTY, properties, 10);
+        int throttleProperty = getProperty(THROTTLE_PROPERTY, properties, 1000);
+        int maxSideLengthProperty = getProperty(MAX_SIDE_LENGTH_PROPERTY, properties, 60);
 
         Set<String> existingAddresses = new HashSet<>();
         File addressFile = loadAddressFile(directory, existingAddresses);
@@ -59,9 +61,9 @@ public class Client {
                     .setApiKey(key)
                     .setQueryRateLimit(queriesPerSecond, throttleProperty);
             if (existingAddresses.isEmpty()){
-                generateMatrix(context, newAddresses, newAddresses);
+                generateMatrix(context, newAddresses, newAddresses, maxSideLengthProperty);
             } else {
-                generateMatrixExtension(context, newAddresses, existingAddresses);
+                generateMatrixExtension(context, newAddresses, existingAddresses, maxSideLengthProperty);
             }
 
             updateAddressFile(addressFile, newAddresses);
@@ -100,7 +102,7 @@ public class Client {
         }
     }
 
-    private void generateMatrixExtension(GeoApiContext context, String[] newAddresses, Set<String> existingAddresses) throws Exception {
+    private void generateMatrixExtension(GeoApiContext context, String[] newAddresses, Set<String> existingAddresses, int maxSideLengthProperty) throws Exception {
         for (String requestedAddress : newAddresses) if (existingAddresses.contains(requestedAddress)) {
             throw new RuntimeException("The address " + requestedAddress + " is already in the address file");
         }
@@ -110,8 +112,8 @@ public class Client {
         System.arraycopy(newAddresses, 0, combinedAddressArray, 0, newAddresses.length);
         System.arraycopy(existingAddressesArray, 0, combinedAddressArray, newAddresses.length, existingAddressesArray.length);
 
-        generateMatrix(context, newAddresses, combinedAddressArray);
-        generateMatrix(context, existingAddressesArray, newAddresses);
+        generateMatrix(context, newAddresses, combinedAddressArray, maxSideLengthProperty);
+        generateMatrix(context, existingAddressesArray, newAddresses, maxSideLengthProperty);
     }
 
     private File loadAddressFile(File directory, Set<String> existingAddresses) throws Exception {
@@ -146,27 +148,48 @@ public class Client {
         return directory;
     }
 
-    private void generateMatrix(GeoApiContext context, String[] from, String[] to) throws Exception {
-        DistanceMatrixApiRequest request = DistanceMatrixApi.getDistanceMatrix(context, from, to);
+    private void generateMatrix(GeoApiContext context, String[] allFrom, String[] allTo, int maxSideLength) throws Exception {
 
-        DistanceMatrix result = request.await();
-        int i = 0;
-        for (DistanceMatrixRow row : result.rows) {
-            int j = 0;
-            for (DistanceMatrixElement element : row.elements) {
-                if (i != j) switch (element.status) {
-                    case NOT_FOUND: {
-                        System.err.println("Route not found");
-                        break;
+        String[][] fromPages = paginate(allFrom, maxSideLength);
+        String[][] toPages = paginate(allTo, maxSideLength);
+
+        for (int y = 0 ; y < toPages.length ; y++) for (int x = 0 ; x < fromPages.length ; x++) {
+            String[] from = fromPages[x];
+            String[] to = toPages[y];
+            DistanceMatrixApiRequest request = DistanceMatrixApi.getDistanceMatrix(context, from, to);
+
+            DistanceMatrix result = request.await();
+            int i = 0;
+            for (DistanceMatrixRow row : result.rows) {
+                int j = 0;
+                for (DistanceMatrixElement element : row.elements) {
+                    if (!(x == y && i == j)) switch (element.status) {
+                        case NOT_FOUND: {
+                            System.err.println("Route not found");
+                            break;
+                        }
+                        case OK: {
+                            System.out.println(from[i] + "," + to[j] + "," + element.distance.inMeters + "," + element.duration.inSeconds);
+                        }
                     }
-                    case OK: {
-                        System.out.println(from[i] + "," + to[j] + "," + element.distance.inMeters + "," + element.duration.inSeconds);
-                    }
+                    j++;
                 }
-                j++;
+                i++;
             }
-            i++;
         }
+    }
+
+    private String[][] paginate(String[] allFrom, int maxPageSize) {
+
+        String[][] ret = new String[(allFrom.length / maxPageSize) + 1][];
+        for (int i = 0; i < ret.length; i++) {
+            int pageLength = i == ret.length -1 ? allFrom.length % maxPageSize : maxPageSize;
+            String[] page = new String[pageLength];
+            System.arraycopy(allFrom, maxPageSize * i, page, 0, pageLength);
+            ret[i] = page;
+        }
+
+        return ret;
     }
 
     private String readKey(BufferedReader reader, String defaultKey) throws Exception {
